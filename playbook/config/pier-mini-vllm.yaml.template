@@ -1,0 +1,34 @@
+# Pier JobConfig template. ``run.sh`` materializes a concrete copy of this
+# file under the per-job dir before invoking pier — pier itself does NOT
+# substitute env vars. Placeholders are wrapped in ``__NAME__`` so envsubst
+# can't be confused by literal ``${...}`` content in nested config YAML.
+#
+# Variables substituted at runtime:
+#   __MODEL_ALIAS__      short served-model alias (derived from MODEL_ID
+#                        by derive_model_defaults.py or overridden by env)
+#   __API_BASE__         OpenAI-compatible URL reachable from inside the
+#                        harbor sandbox (default: http://172.17.0.1:8001/v1
+#                        — the Linux docker bridge gateway). Override via
+#                        $PROXY_BASE_URL_FROM_CONTAINER when networking
+#                        differs (rootless docker, custom networks).
+#   __MODEL_CLASS__      mini-swe-agent's model adapter; ``litellm`` uses
+#                        /v1/chat/completions (which is what vLLM attaches
+#                        routed_experts on). Default kept here as a knob
+#                        for future models that need ``litellm_response``
+#                        plus a different capture path.
+n_concurrent_trials: 1
+agents:
+  - name: mini-swe-agent
+    model_name: openai/__MODEL_ALIAS__
+    env:
+      OPENAI_API_KEY: dummy
+      OPENAI_BASE_URL: __API_BASE__
+    kwargs:
+      model_class: __MODEL_CLASS__
+      step_limit: 50
+      config_yaml: |
+        model:
+          model_name: openai/__MODEL_ALIAS__
+          litellm_model_args:
+            api_base: __API_BASE__
+            api_key: dummy

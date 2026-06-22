@@ -1,0 +1,7 @@
+work/
+secrets/minimax_api_key.txt
+secrets/*.txt
+!secrets/*.example
+__pycache__/
+*.pyc
+.opencode/agent/router-bench.md

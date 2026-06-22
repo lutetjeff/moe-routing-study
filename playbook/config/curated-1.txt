@@ -1,0 +1,2 @@
+# Single smallest-feeling task for fast smoke/sanity.
+fd-deterministic-multi-key-sorting

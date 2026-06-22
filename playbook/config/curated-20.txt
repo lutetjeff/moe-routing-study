@@ -1,0 +1,26 @@
+# 20 hand-picked deep-swe task IDs covering diverse software domains.
+# Languages: 6 go, 6 python, 6 typescript, 1 javascript, 1 rust.
+# Domain coverage: lang interpreter, CI lint, file CLI, VCS, k8s templating,
+# policy engine, web framework, security analysis, HTTP client, LLM framework,
+# JIT/scientific, DB CLI, SQL DSL, streaming HTTP, DOM emulation, terminal UI,
+# JS parser, validation library, math typesetting, fs CLI.
+abs-module-cache-flags
+actionlint-action-pinning-lint
+dasel-html-document-format
+go-git-worktree-merge-conflicts
+helm-array-merge-strategies
+opa-rego-rule-profiling
+fastapi-deprecation-response-headers
+bandit-interprocedural-taint-checks
+httpx-streaming-json-iteration
+langchain-request-coalescing
+numba-stencil-boundary-modes
+sqlite-utils-safe-import-checkpoints
+drizzle-orm-window-function-builders
+effect-sse-httpapi-streaming
+happy-dom-deterministic-intersectionobserver
+ink-grid-box-layout
+meriyah-explicit-resource-declarations
+valibot-recursive-schema-composition
+katex-multicolumn-array-spans
+fd-deterministic-multi-key-sorting

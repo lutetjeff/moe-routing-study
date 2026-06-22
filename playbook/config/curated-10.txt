@@ -1,0 +1,11 @@
+# First 10 tasks from curated-20.txt, balanced across go/python/typescript/js/rust.
+abs-module-cache-flags
+actionlint-action-pinning-lint
+helm-array-merge-strategies
+fastapi-deprecation-response-headers
+httpx-streaming-json-iteration
+numba-stencil-boundary-modes
+drizzle-orm-window-function-builders
+ink-grid-box-layout
+katex-multicolumn-array-spans
+fd-deterministic-multi-key-sorting
