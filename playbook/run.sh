@@ -47,11 +47,20 @@ PROXY_BASE_URL_FROM_CONTAINER="${PROXY_BASE_URL_FROM_CONTAINER:-http://172.17.0.
 if [ -z "$TOOL_CALL_PARSER" ] || [ "$TOOL_CALL_PARSER" = "unknown" ]; then
   fail "could not auto-detect tool-call parser for $MODEL_ID. Set TOOL_CALL_PARSER=... explicitly. (raw probe: $DEFAULTS_JSON)"
 fi
+
+# Context length. The probe surfaces ``max_position_embeddings`` from the
+# HF config (e.g. 262144 for Qwen3.5-MoE), which is the model's upper
+# bound. We DO NOT auto-jump to that — long contexts cost KV-cache
+# memory and a poorly chosen max-len will OOM mid-run. The user provides
+# the right value for their GPU; we fall back to 16384 if they don't.
+PROBE_MAX_POS="$(get_default max_position_embeddings)"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
 log "model_id=$MODEL_ID"
 log "model_alias=$MODEL_ALIAS"
 log "tool_call_parser=$TOOL_CALL_PARSER"
 log "model_class=$MODEL_CLASS"
 log "container_proxy_url=$PROXY_BASE_URL_FROM_CONTAINER"
+log "max_model_len=$MAX_MODEL_LEN  (model max: ${PROBE_MAX_POS:-unknown}; override with MAX_MODEL_LEN=...)"
 
 # 0. cleanup hooks ---------------------------------------------------------
 VLLM_PID=""
@@ -107,7 +116,7 @@ banner "starting vLLM"
   --model "$MODEL_ID" \
   --served-model-name "$MODEL_ID" "$MODEL_ALIAS" \
   --port "$VLLM_PORT" \
-  --max-model-len "${MAX_MODEL_LEN:-16384}" \
+  --max-model-len "$MAX_MODEL_LEN" \
   --gpu-memory-utilization "${GPU_MEM_UTIL:-0.85}" \
   --enable-return-routed-experts \
   --enable-auto-tool-choice \

@@ -77,7 +77,7 @@ framework lives at `${PLAYBOOK_DIR}` and stores artifacts under `${WORK_DIR}`.
 | `MODEL_ALIAS` | vLLM returns `404 The model "X" does not exist`. The probe-suggested alias didn't match what the chat template expects. Use the exact name shown in the 404. |
 | `TOOL_CALL_PARSER` | (a) probe returned `unknown`, OR (b) vLLM logs `unknown tool parser`, OR (c) mini-swe-agent sees `BadRequestError: "auto" tool choice requires ... tool-call-parser`. Pick from the list below by chat-template format. |
 | `MODEL_CLASS` | mini-swe-agent's litellm adapter. Default `litellm` (uses `/v1/chat/completions`, which is where capture lives). Only flip to `litellm_response` if a model serves *only* the Responses API — then routing capture won't work and you should abort. |
-| `MAX_MODEL_LEN` | vLLM logs `value of max_model_len ... is greater than ...`. Use the probe's `max_position_embeddings`. |
+| `MAX_MODEL_LEN` | **Always set this if the user hasn't.** The default is 16384, which silently drops any request whose prompt is longer than that with `This model's maximum context length is 16384`. Read the probe's `max_position_embeddings` for the model ceiling, then pick a value your GPU memory can hold (start with the smaller of `max_position_embeddings` and a value that left previous runs stable). If vLLM startup fails with `value of max_model_len ... is greater than ...`, you went too high; halve it and retry. |
 | `PROXY_BASE_URL_FROM_CONTAINER` | Container can't reach `172.17.0.1:8001`. Rootless docker / k8s typically need a different gateway IP. |
 
 Available `TOOL_CALL_PARSER` values (run `${PY} -m vllm.entrypoints.openai.api_server --help | grep tool-call-parser` for the full list on this vLLM build):

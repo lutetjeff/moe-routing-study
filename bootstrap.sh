@@ -34,7 +34,13 @@
 #   VLLM_PORT        default 8000
 #   PROXY_PORT       default 8001
 #   GPU_MEM_UTIL     default 0.85
-#   MAX_MODEL_LEN    default 16384
+#   MAX_MODEL_LEN    vLLM --max-model-len. Default 16384. Set this to the
+#                    largest value your model + KV-cache budget supports;
+#                    `derive_model_defaults.py` prints the model's upper
+#                    bound (max_position_embeddings) as a reference, but
+#                    the right number is GPU-dependent so we don't pick
+#                    it for you. Requests above this cap are rejected
+#                    by vLLM and no routing is captured for them.
 #   CONCURRENCY      default 1 (serial; safest on a single GPU)
 #
 # Per-model overrides (usually NOT needed — derive_model_defaults.py

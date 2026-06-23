@@ -72,7 +72,14 @@ echo 'sk-yourkey' > secrets/minimax_api_key.txt
 # 2. tell the framework which HF id this vLLM recipe serves
 export MODEL_ID=cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit
 
-# 3. full pipeline: setup -> smoke test -> run -> analyze -> tarball
+# 3. (recommended) set the largest --max-model-len your GPU + KV cache
+#    can hold. Defaults to 16384 if you don't set it. Requests over this
+#    cap are rejected by vLLM and won't have routing captured.
+#    Probe the model's upper bound first:
+$PY playbook/derive_model_defaults.py "$MODEL_ID" | python3 -m json.tool | grep max_position
+export MAX_MODEL_LEN=32768
+
+# 4. full pipeline: setup -> smoke test -> run -> analyze -> tarball
 ./bootstrap.sh run 10
 ```
 
@@ -142,7 +149,7 @@ When auto-detection is wrong, override from the environment:
 | `MODEL_ALIAS` | vLLM returns `404 The model "X" does not exist`. Use the exact name shown in the error. | `qwen3-coder` |
 | `TOOL_CALL_PARSER` | probe returns `unknown`, or vLLM logs `unknown tool parser`, or LiteLLM raises `BadRequestError: "auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser`. | `deepseek_v3` |
 | `MODEL_CLASS` | only for models that serve **only** the Responses API. Default `litellm` (hits `/v1/chat/completions`, which is where capture lives). Setting `litellm_response` will break capture — don't unless you're rewiring the proxy too. | `litellm` |
-| `MAX_MODEL_LEN` | vLLM rejects the default 16384 because the model's `max_position_embeddings` is lower. Use the probe value. | `32768` |
+| `MAX_MODEL_LEN` | **always worth setting.** Default is 16384, which is below most modern models' true ceiling. Set this to the largest value your GPU + KV-cache budget tolerates — the probe's `max_position_embeddings` is the model's upper bound, the right run-time value depends on your VRAM. Requests over the cap are rejected by vLLM and produce no routing capture. | `32768` |
 | `GPU_MEM_UTIL` | the model + KV doesn't fit at 0.85 of GPU mem. | `0.92` |
 | `PROXY_BASE_URL_FROM_CONTAINER` | Container can't reach `172.17.0.1:$PROXY_PORT`. Common on rootless docker. | `http://192.168.65.2:8001/v1` |
 | `VLLM_PORT` / `PROXY_PORT` | something else owns 8000/8001 on the host. | `9000` / `9001` |
@@ -317,6 +324,7 @@ this is the fix:
 | 6 | `Smoke: FAIL reason=vllm_did_not_become_ready_in_300s` | torch.compile cold start can exceed 5 minutes on first boot. | Re-run; the second boot uses cached graphs. Or set `VLLM_USE_PRECOMPILED=1` if your build supports it. |
 | 7 | proxy logs `routed_experts MISSING from response` | vLLM came up without the capture flag, or the model isn't actually MoE. | `setup.sh`'s probe should have failed first; re-run it. |
 | 8 | `n_total_trials = 1, n_errored_trials = 1`, reward = 0 | mini-swe-agent ran but didn't produce a correct patch. This is normal — we don't care about reward, only about whether routing captured. | Confirm routing was captured: `find work/runs/<job> -name '*.npz' \| wc -l` should match the request count in `pier.log`. |
+| 9 | vLLM logs `This model's maximum context length is 16384 ... prompt contains at least <N>`, captured request count drops below pier's request count | `MAX_MODEL_LEN` left at the 16384 default. Long agent turns over that cap are rejected with no routing captured. | Set `MAX_MODEL_LEN` to the largest your GPU can hold (probe `derive_model_defaults.py` for the model's upper bound `max_position_embeddings`) and re-run. |
 
 ---
 
