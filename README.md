@@ -49,8 +49,9 @@ completions, **70 177 tokens with full routing**, 40 layers × top-k 8,
 | vLLM ≥ 0.21 with `RoutedExpertsCapturer` | the `--enable-return-routed-experts` flag is what makes everything work | `0.21.1rc1.dev400+g7e53283b1` (sgl-project fork) |
 | A MoE model | nothing to capture on a dense model | Qwen3.5-MoE, DeepSeek-V3, MiniMax-M1/M2, Mixtral, etc. |
 | Python 3.11+ in the vLLM environment | bootstrap searches for it | 3.11.15 |
-| `docker`, with caller in the `docker` group | pier needs it to build the harbor sandbox + egress proxy containers | 27.5.1 |
-| Internet during setup | pulls pier, mini-swe-agent, deep-swe tasks, harbor docker images | — |
+| `docker`, caller in `docker` group | **only for the `pier` backend.** Required to build the harbor sandbox + egress proxy containers. Not needed for the `local` backend (vast.ai, containers without docker-in-docker, etc.). | 27.5.1 |
+| `git`, `rsync` | the `local` backend clones each task's repo + materializes per-trial workdirs | — |
+| Internet during setup | pulls pier (pier backend only), mini-swe-agent, deep-swe tasks | — |
 | Optional: a [MiniMax](https://www.minimax.io/) key | only needed if you want the opencode operator agent to drive the run | — |
 
 If vLLM is missing the capture flag, `setup.sh` exits with
@@ -80,16 +81,18 @@ $PY playbook/derive_model_defaults.py "$MODEL_ID" | python3 -m json.tool | grep 
 export MAX_MODEL_LEN=32768
 
 # 4. full pipeline: setup -> smoke test -> run -> analyze -> tarball
-./bootstrap.sh run 10
+./bootstrap.sh run 10                # picks BACKEND automatically (pier if docker works, else local)
+./bootstrap.sh run pier 10           # force pier backend
+./bootstrap.sh run local 10          # force docker-free local backend
 ```
 
-`./bootstrap.sh run N` is the supported entry point. `N ∈ {1, 10, 20}`
+`./bootstrap.sh run [BACKEND] [N]` is the supported entry point. `N ∈ {1, 10, 20}`
 maps to the curated task lists in `playbook/config/curated-N.txt` and to
 the wall-clock budget below.
 
-If you'd rather have an LLM operator drive (probe the model, run setup,
-catch and retry transient failures, surface a one-line "stop your GPU"
-abort if the smoke test breaks), use:
+If you'd rather have an LLM operator drive (probe the model, pick the
+backend, run setup, catch and retry transient failures, surface a
+one-line "stop your GPU" abort if the smoke test breaks), use:
 
 ```bash
 ./bootstrap.sh agent 10
@@ -101,16 +104,64 @@ surface opencode's internal logs.
 
 ---
 
+## Backends
+
+The framework supports two interchangeable execution backends for the
+SWE workload. They share everything else (vLLM, the routing proxy, the
+analysis pipeline) and produce structurally identical job directories.
+
+| | `pier` (default when docker is available) | `local` (default on hosts without docker) |
+|---|---|---|
+| Where the agent runs | Inside a per-trial prebuilt harbor docker sandbox | On the host, as the unprivileged `mse-runner` user |
+| Sandboxing | docker namespace + cgroup + squid egress proxy | dedicated unix user + per-trial workdir chowned to it |
+| Grading | Runs inline at the end of each trial (verifier image, harbor format, `reward.json`) | **Deferred**, run separately later with `./bootstrap.sh grade <job>` on any host with docker |
+| Trial isolation across tasks | Strong (one container per trial) | Moderate (per-trial workdir, but shared host filesystem outside it) |
+| Network egress from agent | Mediated by squid (allowlist) | Direct host egress (the agent has whatever the host has) |
+| Required tools | `docker`, `pier`, `mini-swe-agent` | `git`, `rsync`, `mini-swe-agent`, ability to create a system user |
+| Works on vast.ai / similar containers | ❌ docker-in-docker generally not permitted | ✅ |
+| Captured routing per task | Identical (both backends send through the routing proxy with the same `X-Trial-Id` / `X-Task-Id` headers) | Identical |
+
+Routing data is the same shape and quality from both backends — the
+agent's LLM traffic flows through the routing proxy regardless, and the
+proxy doesn't care who's calling. The only differences are isolation
+guarantees and when grading happens.
+
+**Switching backends** — three equivalent ways:
+
+```bash
+./bootstrap.sh run local 10           # positional
+BACKEND=local ./bootstrap.sh run 10   # env var
+./bootstrap.sh agent 10               # let the operator pick
+```
+
+**Grading a local-backend run** — the local runner writes a
+`verifier/.pending` sentinel into each trial dir. Later, on any host
+with docker:
+
+```bash
+./bootstrap.sh grade work/runs/<job-name>     # or just the job name
+```
+
+`grade.py` builds each task's verifier image from `<task>/tests/Dockerfile`,
+mounts in our captured `artifacts/model.patch`, runs the task's own
+grading recipe, and writes `verifier/reward.json` + `verifier/ctrf.json`
++ `verifier/run.stdout.txt`. Idempotent — re-running skips already-graded
+trials. Trials with empty patches short-circuit to reward=0 without
+spinning up docker.
+
+---
+
 ## Bootstrap commands
 
 `bootstrap.sh` is a thin dispatcher around the playbook:
 
 | Command | What it does |
 |---|---|
-| `./bootstrap.sh setup` | install pier + mini-swe-agent, build the proxy venv (Python 3.11, fastapi/uvicorn/httpx/numpy/matplotlib), clone deep-swe, probe vLLM, write the MiniMax credential if present. Idempotent. |
+| `./bootstrap.sh setup [BACKEND]` | install mini-swe-agent + proxy venv + deep-swe + (for `pier` backend) pier itself + (for `local` backend) the `mse-runner` unprivileged user and a passwordless sudoers entry. Probes vLLM. Idempotent. |
 | `./bootstrap.sh smoke` | runs setup, then boots vLLM, sends one tiny `/v1/completions`, decodes `choices[0].routed_experts`, asserts the array is `(T, L, K)` with non-zero layers. Tears everything down. Useful as a 5-minute "is this going to work?" probe before paying for a long run. |
-| `./bootstrap.sh run [N]` | setup + smoke + the full N-task playbook. Aborts on smoke failure with a "stop your GPU instance" message. |
-| `./bootstrap.sh agent [N]` | setup, then hands control to the opencode `router-bench` operator agent (default `minimax/MiniMax-M3`). Streams live. |
+| `./bootstrap.sh run [BACKEND] [N]` | setup + smoke + the full N-task playbook. Aborts on smoke failure with a "stop your GPU instance" message. |
+| `./bootstrap.sh agent [N]` | setup, then hands control to the opencode `router-bench` operator agent (default `minimax/MiniMax-M3`). Streams live. The agent picks the backend based on `docker info`. |
+| `./bootstrap.sh grade <job>` | post-hoc grade a local-backend run on a docker host. Writes `verifier/reward.json` next to each captured trial. Can be invoked on a different machine than the one that captured the data. |
 | `./bootstrap.sh teardown` | best-effort cleanup of dangling vLLM, proxy, pier sandbox containers, and egress-proxy containers. Safe to run anytime. |
 | `./bootstrap.sh report <job>` | rebuild the analysis graphs + run mmx descriptions for an existing job dir (useful after pulling someone else's tarball). |
 
@@ -192,16 +243,18 @@ Edit the `_FAMILY_TO_PARSER` list at the top of
 3. boot routing proxy (work/runs/<job>/logs/proxy.log)
      uvicorn routing_proxy:app on :8001
 4. wait for both /health (max 5 min)
-5. materialize pier-mini-vllm.yaml from template
-6. run pier under timeout(1) wrapper with the job budget
-     pier run -p <curated dataset> --env docker -c <materialized yaml>
-              --jobs-dir work/runs/<job>/pier-jobs --n-concurrent 1
-7. analysis/build_report.py over every captured .npz
-8. tar the job dir to work/runs/<job>.tar.gz
-9. tear down vLLM + proxy + dangling sandbox containers
-10. print one of:
-    RUN: OK job=<name>
-    RUN: PARTIAL job=<name> reason=job_budget_hit | pier_exit_<rc>
+5. exec backends/<BACKEND>.sh under timeout(1) wrapper with the job budget
+     pier  : materialize pier-mini-vllm.yaml; pier run --env docker
+     local : local_runner.py walks curated tasks, clones each repo at
+             base_commit, runs mini-swe-agent as `mse-runner` against
+             a per-trial workdir, captures (trajectory, model.patch)
+6. analysis/build_report.py over every captured .npz
+7. tar the job dir to work/runs/<job>.tar.gz
+8. tear down vLLM + proxy + dangling sandbox containers
+9. print one of:
+    RUN: OK job=<name> backend=pier
+    RUN: OK job=<name> backend=local grading_pending=true ...
+    RUN: PARTIAL job=<name> backend=... reason=job_budget_hit | backend_exit_<rc>
 ```
 
 ### Watchdogs
@@ -339,13 +392,18 @@ graph1.png graph2.png graph3.png          reference analysis chart style
 playbook/
   setup.sh                                idempotent installer + vLLM capture probe
   smoke.sh                                ~5-min boot+probe+decode validation
-  run.sh                                  end-to-end orchestrator with watchdog
+  run.sh                                  end-to-end orchestrator with watchdog; dispatches to backend
   teardown.sh                             best-effort cleanup
   probe_vllm.py                           tier A/B detection, forbids tier C, requires >= 0.21
   derive_model_defaults.py                MODEL_ID -> {alias, tool_call_parser, max_seq_len, ...}
   vllm_compat.py                          flag shim used during probing
   routing_proxy.py                        FastAPI proxy: peels routed_experts, writes .npz + sidecar
   prepare_curated.py                      materializes curated subset, patches task.toml fields
+  local_runner.py                         docker-free runner: clones repo, runs mini-swe as mse-runner
+  grade.py                                deferred grader for local-backend trials (docker required)
+  backends/
+    pier.sh                               pier+docker backend (sandboxes each trial)
+    local.sh                              docker-free local backend driver
   config/
     pier-mini-vllm.yaml.template          __MODEL_ALIAS__/__API_BASE__/__MODEL_CLASS__ placeholders
     curated-{1,10,20}.txt                 frozen task IDs (lang-balanced + 17 software domains)

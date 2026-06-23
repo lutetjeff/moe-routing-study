@@ -50,20 +50,125 @@ esac
 echo "$tier" >"$WORK_DIR/.tier"
 
 # 2. pier + mini-swe-agent via uv ------------------------------------------
+# Backend resolution. The local backend is docker-free but still needs
+# mini-swe-agent. Pier is only installed when BACKEND=pier (or auto when
+# docker is available). This keeps vast.ai-style hosts lean.
+BACKEND="${BACKEND:-}"
+if [ -z "$BACKEND" ]; then
+  if docker info >/dev/null 2>&1; then
+    BACKEND=pier
+  else
+    BACKEND=local
+  fi
+fi
+case "$BACKEND" in
+  pier|local) ;;
+  *) fail "unknown BACKEND='$BACKEND' (expected pier|local)" ;;
+esac
+log "backend=$BACKEND"
+
 if ! command -v uv >/dev/null 2>&1; then
   log "installing uv..."
   curl -LsSf https://astral.sh/uv/install.sh | sh
   export PATH="$HOME/.local/bin:$PATH"
 fi
 
-# Both are no-op if already installed.
-uv tool install datacurve-pier 2>&1 | tail -3 >&2 || warn "pier install reported issues"
+# mini-swe-agent is needed by BOTH backends (pier invokes it inside
+# its sandbox; local runs it on the host).
 uv tool install mini-swe-agent 2>&1 | tail -3 >&2 || warn "mini-swe install reported issues"
+command -v mini-swe-agent >/dev/null || fail "mini-swe-agent not on PATH after install"
 
-PIER="$(command -v pier || true)"
-[ -z "$PIER" ] && PIER="$HOME/.local/bin/pier"
-[ -x "$PIER" ] || fail "pier not on PATH after install"
-log "pier: $PIER ($("$PIER" --version 2>/dev/null || echo unknown))"
+if [ "$BACKEND" = "pier" ]; then
+  uv tool install datacurve-pier 2>&1 | tail -3 >&2 || warn "pier install reported issues"
+  PIER="$(command -v pier || true)"
+  [ -z "$PIER" ] && PIER="$HOME/.local/bin/pier"
+  [ -x "$PIER" ] || fail "pier not on PATH after install"
+  log "pier: $PIER ($("$PIER" --version 2>/dev/null || echo unknown))"
+else
+  log "skipping pier install (BACKEND=local)"
+fi
+
+# Local backend needs an unprivileged user to drop privileges to before
+# spawning mini-swe-agent. Creating it once at setup avoids per-trial
+# adduser races. Idempotent.
+if [ "$BACKEND" = "local" ]; then
+  MSE_USER="${MSE_RUNNER_USER:-mse-runner}"
+  if ! id "$MSE_USER" >/dev/null 2>&1; then
+    if [ "$(id -u)" = "0" ]; then
+      log "creating system user $MSE_USER"
+      adduser --system --group --no-create-home --shell /usr/sbin/nologin "$MSE_USER" \
+        >&2 2>/dev/null \
+        || useradd --system --no-create-home --shell /usr/sbin/nologin "$MSE_USER" >&2 \
+        || fail "could not create user $MSE_USER (try running setup.sh as root)"
+    else
+      # Try sudo. If passwordless sudo is available we can do it now.
+      if command -v sudo >/dev/null && sudo -n true 2>/dev/null; then
+        log "creating system user $MSE_USER (via sudo)"
+        sudo adduser --system --group --no-create-home --shell /usr/sbin/nologin "$MSE_USER" \
+          >&2 2>/dev/null \
+          || sudo useradd --system --no-create-home --shell /usr/sbin/nologin "$MSE_USER" >&2 \
+          || fail "could not create user $MSE_USER even via sudo"
+      else
+        fail "user '$MSE_USER' missing and we have no root/sudo to create it. Run as root once: 'adduser --system --no-create-home --shell /usr/sbin/nologin $MSE_USER'"
+      fi
+    fi
+  fi
+  log "mse-runner user OK: $(id "$MSE_USER")"
+
+  # Sudoers entry that lets the current user drop to mse-runner without
+  # a password, restricted to running mini-swe-agent + env. Skipped if
+  # we can't write sudoers (then local.sh will fall back to runuser if
+  # we're already root).
+  if [ "$(id -u)" = "0" ] || (command -v sudo >/dev/null && sudo -n true 2>/dev/null); then
+    sudoers_path="/etc/sudoers.d/expert-routing-mse-runner"
+    sudoers_content="$USER ALL=($MSE_USER) NOPASSWD: ALL"
+    if [ "$(id -u)" = "0" ]; then
+      echo "$sudoers_content" >"$sudoers_path" 2>/dev/null && chmod 0440 "$sudoers_path" && \
+        log "wrote $sudoers_path"
+    else
+      echo "$sudoers_content" | sudo tee "$sudoers_path" >/dev/null 2>&1 \
+        && sudo chmod 0440 "$sudoers_path" \
+        && log "wrote $sudoers_path"
+    fi
+  fi
+
+  # mse-runner needs traversal access to the dirs containing the
+  # mini-swe-agent binary + its uv-managed python venv. On a typical
+  # workstation `/home/$USER` is mode 0700 which blocks mse-runner
+  # from even seeing the binary. Open up traversal (o+x on dirs)
+  # and read (o+r on the tool install) — but NOT on the rest of the
+  # user's home. The leak is limited to "mse-runner can read the
+  # mini-swe-agent install" which is required to run it.
+  MSE_BIN="$(command -v mini-swe-agent || true)"
+  if [ -n "$MSE_BIN" ]; then
+    # Resolve the install root: usually ~/.local/share/uv/tools/mini-swe-agent
+    MSE_REAL="$(readlink -f "$MSE_BIN")"
+    log "mini-swe-agent at $MSE_REAL"
+    # Walk up from the binary to $HOME granting `o+x` traversal.
+    cur="$(dirname "$MSE_REAL")"
+    while [ "$cur" != "/" ] && [ "$cur" != "$HOME/.." ] && [ "$cur" != "" ]; do
+      chmod o+x "$cur" 2>/dev/null || sudo chmod o+x "$cur" 2>/dev/null || true
+      [ "$cur" = "$HOME" ] && break
+      cur="$(dirname "$cur")"
+    done
+    # And the toolkit install root needs to be world-readable so the
+    # interpreter can load its own libs.
+    tool_root="$HOME/.local/share/uv/tools/mini-swe-agent"
+    py_root="$HOME/.local/share/uv/python"
+    if [ -d "$tool_root" ]; then
+      chmod -R o+rX "$tool_root" 2>/dev/null || sudo chmod -R o+rX "$tool_root" 2>/dev/null || true
+    fi
+    if [ -d "$py_root" ]; then
+      chmod -R o+rX "$py_root" 2>/dev/null || sudo chmod -R o+rX "$py_root" 2>/dev/null || true
+    fi
+    # Also expose ~/.local/bin so the symlink resolves.
+    if [ -d "$HOME/.local/bin" ]; then
+      chmod o+rx "$HOME/.local/bin" 2>/dev/null || sudo chmod o+rx "$HOME/.local/bin" 2>/dev/null || true
+    fi
+    # Save the resolved absolute path for local_runner.py to use.
+    echo "$MSE_BIN" >"$WORK_DIR/.mini-swe-agent-bin"
+  fi
+fi
 
 # 3. proxy venv -------------------------------------------------------------
 PROXY_VENV="$WORK_DIR/proxy-venv"
@@ -135,6 +240,7 @@ fi
 
 # 7. final sanity-touch ----------------------------------------------------
 echo "$tier" > "$WORK_DIR/.tier"
+echo "$BACKEND" > "$WORK_DIR/.backend"
 echo "ok" > "$WORK_DIR/.setup_ok"
 log "setup complete"
-echo "SETUP: OK tier=$tier"
+echo "SETUP: OK tier=$tier backend=$BACKEND"

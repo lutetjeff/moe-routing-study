@@ -2,12 +2,19 @@
 # bootstrap.sh — single drop-in entry point for the expert-routing benchmark.
 #
 # Usage:
-#   ./bootstrap.sh run [N]          # full pipeline (default N=1)
-#   ./bootstrap.sh setup            # install deps only, no run
-#   ./bootstrap.sh smoke            # capture smoke test only
-#   ./bootstrap.sh agent [N]        # run via opencode operator agent
-#   ./bootstrap.sh teardown         # kill servers, drop containers
-#   ./bootstrap.sh report <job>     # rebuild analysis for an existing run
+#   ./bootstrap.sh run [BACKEND] [N]   # full pipeline (default backend=auto, N=1)
+#   ./bootstrap.sh setup [BACKEND]     # install deps only, no run
+#   ./bootstrap.sh smoke               # capture smoke test only
+#   ./bootstrap.sh agent [N]           # run via opencode operator agent
+#   ./bootstrap.sh teardown            # kill servers, drop containers
+#   ./bootstrap.sh report <job>        # rebuild analysis for an existing run
+#   ./bootstrap.sh grade <job-dir>     # post-hoc grade a local-backend run
+#
+# BACKEND choice (positional arg or BACKEND= env):
+#   pier   — pier+docker (sandboxes each trial in its prebuilt task image)
+#   local  — docker-free local runner (clones repo, runs mini-swe-agent
+#            as an unprivileged user on the host; grading is deferred)
+#   auto   — pier if docker+pier work, else local (default)
 #
 # What it does (`run` mode):
 #   1. Resolves PY/MODEL/WORK from env or sensible defaults.
@@ -158,11 +165,16 @@ echo "[bootstrap] using PY=$PY" >&2
 export PLAYBOOK_DIR WORK_DIR PY MODEL_ID MINIMAX_KEY_FILE
 mkdir -p "$WORK_DIR"
 
+# Parse leading subcommand. Sub-cases consume an optional BACKEND
+# positional (pier|local|auto) for the commands that care.
 cmd="${1:-run}"
 shift || true
 
 case "$cmd" in
   setup)
+    case "${1:-}" in pier|local|auto) BACKEND="$1"; shift;; esac
+    [ "${BACKEND:-}" = "auto" ] && unset BACKEND  # let setup auto-detect
+    export BACKEND
     bash "$PLAYBOOK_DIR/setup.sh"
     ;;
   smoke)
@@ -170,13 +182,27 @@ case "$cmd" in
     bash "$PLAYBOOK_DIR/smoke.sh"
     ;;
   run)
-    N="${1:-1}"
+    case "${1:-}" in pier|local|auto) BACKEND="$1"; shift;; esac
+    [ "${BACKEND:-}" = "auto" ] && unset BACKEND
+    export BACKEND
     bash "$PLAYBOOK_DIR/setup.sh"
     if ! bash "$PLAYBOOK_DIR/smoke.sh"; then
       echo "BOOTSTRAP: ABORT smoke test failed — stop your GPU instance to save spend." >&2
       exit 2
     fi
-    bash "$PLAYBOOK_DIR/run.sh" "$N"
+    # Forward remaining positionals: N [JOB_NAME]
+    bash "$PLAYBOOK_DIR/run.sh" "$@"
+    ;;
+  grade)
+    job_dir="${1:?usage: bootstrap.sh grade <job-dir>}"
+    # Allow short form: just the job name under work/runs/.
+    if [ ! -d "$job_dir" ] && [ -d "$WORK_DIR/runs/$job_dir" ]; then
+      job_dir="$WORK_DIR/runs/$job_dir"
+    fi
+    [ -d "$job_dir" ] || { echo "no such job dir: $job_dir" >&2; exit 1; }
+    # grade.py uses tomllib (3.11+), which is fine since our PY has it.
+    # docker is checked inside grade.py.
+    "$PY" "$PLAYBOOK_DIR/grade.py" "$job_dir"
     ;;
   agent)
     N="${1:-1}"
@@ -221,7 +247,8 @@ case "$cmd" in
     ls -la "$JOB_DIR/report"
     ;;
   *)
-    echo "usage: $0 {setup|smoke|run [N]|agent [N]|teardown|report <job>}" >&2
+    echo "usage: $0 {setup [BACKEND]|smoke|run [BACKEND] [N]|agent [N]|teardown|report <job>|grade <job-dir>}" >&2
+    echo "       BACKEND ∈ {pier, local, auto}" >&2
     exit 2
     ;;
 esac
